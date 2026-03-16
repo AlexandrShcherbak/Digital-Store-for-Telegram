@@ -14,6 +14,51 @@ products = db.table('products')
 stats = db.table('stats')
 categories = db.table('categories')
 purchases = db.table('purchases')
+invoices = db.table('invoices')
+
+
+def next_table_id(table):
+    records = table.all()
+    if not records:
+        return 1
+    max_id = max(record.get('id', 0) for record in records)
+    return max_id + 1
+
+
+def build_categories_markup():
+    markup = types.InlineKeyboardMarkup()
+    all_categories = categories.all()
+    for i in range(0, len(all_categories), 2):
+        row = [types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"category_{all_categories[i]['id']}")]
+        if i + 1 < len(all_categories):
+            row.append(types.InlineKeyboardButton(all_categories[i + 1]['name'], callback_data=f"category_{all_categories[i + 1]['id']}"))
+        markup.add(*row)
+    return markup
+
+
+def process_search_query(message):
+    query_text = (message.text or '').strip().lower()
+    if len(query_text) < 2:
+        bot.send_message(message.chat.id, 'Введите минимум 2 символа для поиска.')
+        return
+
+    found_items = [
+        item for item in products.all()
+        if query_text in item.get('name', '').lower() or query_text in item.get('description', '').lower()
+    ]
+
+    if not found_items:
+        bot.send_message(message.chat.id, 'Ничего не найдено. Попробуйте другой запрос.')
+        return
+
+    markup = types.InlineKeyboardMarkup()
+    for item in found_items[:20]:
+        markup.add(types.InlineKeyboardButton(item['name'], callback_data=f"item_{item['id']}"))
+
+    if len(found_items) > 20:
+        bot.send_message(message.chat.id, f"Найдено {len(found_items)} товаров. Показаны первые 20.", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, f"Найдено товаров: {len(found_items)}", reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -24,7 +69,7 @@ def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(types.KeyboardButton("🏪 Купить"), types.KeyboardButton("📋 Товары"))
     markup.row(types.KeyboardButton("👤 Профиль"), types.KeyboardButton("💳 Пополнить баланс"))
-    markup.row(types.KeyboardButton("🛒 Мои покупки"))
+    markup.row(types.KeyboardButton("🛒 Мои покупки"), types.KeyboardButton("🔎 Поиск"))
     bot.send_message(message.chat.id, "<b>Привет! Добро пожаловать в наш магазин!</b>", reply_markup=markup, parse_mode='HTML')
 
 @bot.message_handler(commands=['admin'])
@@ -55,19 +100,18 @@ def handle_text(message):
         markup.add(types.InlineKeyboardButton("🤖USDT Crypto Bot", callback_data="pay_usdt"))
         bot.send_message(chat_id, "➖ Пополнение баланса ➖\n\nВыберите способ пополнения баланса.", reply_markup=markup)
     elif message.text == "🏪 Купить":
-        markup = types.InlineKeyboardMarkup()
-        all_categories = categories.all()
-        for i in range(0, len(all_categories), 2):
-            row = []
-            row.append(types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"category_{all_categories[i]['id']}"))
-            if i + 1 < len(all_categories):
-                row.append(types.InlineKeyboardButton(all_categories[i+1]['name'], callback_data=f"category_{all_categories[i+1]['id']}"))
-            markup.add(*row)
-        bot.send_message(chat_id, "Каталог", reply_markup=markup)
+        markup = build_categories_markup()
+        if not categories.all():
+            bot.send_message(chat_id, "Категории пока не добавлены")
+        else:
+            bot.send_message(chat_id, "Каталог", reply_markup=markup)
     elif message.text == "📋 Товары":
         show_products_list(chat_id)
     elif message.text == "🛒 Мои покупки":
         show_purchases(chat_id, user_id)
+    elif message.text == "🔎 Поиск":
+        msg = bot.send_message(chat_id, "Введите название или часть описания товара для поиска:")
+        bot.register_next_step_handler(msg, process_search_query)
 
 def process_amount(message):
     try:
@@ -97,13 +141,15 @@ def callback_handler(call):
                 markup = types.InlineKeyboardMarkup()
                 items = products.search(Query().category_id == category_id)
                 for i in range(0, len(items), 2):
-                    row = []
-                    row.append(types.InlineKeyboardButton(items[i]['name'], callback_data=f"item_{items[i]['id']}"))
+                    row = [types.InlineKeyboardButton(items[i]['name'], callback_data=f"item_{items[i]['id']}")]
                     if i + 1 < len(items):
-                        row.append(types.InlineKeyboardButton(items[i+1]['name'], callback_data=f"item_{items[i+1]['id']}"))
+                        row.append(types.InlineKeyboardButton(items[i + 1]['name'], callback_data=f"item_{items[i + 1]['id']}"))
                     markup.add(*row)
                 markup.add(types.InlineKeyboardButton("Назад", callback_data="back_to_catalog"))
-                bot.send_message(chat_id, f"Каталог: {category['name']}", reply_markup=markup)
+                if items:
+                    bot.send_message(chat_id, f"Каталог: {category['name']}", reply_markup=markup)
+                else:
+                    bot.send_message(chat_id, f"В разделе '{category['name']}' пока нет товаров.", reply_markup=markup)
         
         elif call.data.startswith("item_"):
             item_id = int(call.data.split("_")[1])
@@ -126,15 +172,10 @@ def callback_handler(call):
         
         elif call.data == "goto_buy":
             bot.delete_message(chat_id, message_id)
-            markup = types.InlineKeyboardMarkup()
-            all_categories = categories.all()
-            for i in range(0, len(all_categories), 2):
-                row = []
-                row.append(types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"category_{all_categories[i]['id']}"))
-                if i + 1 < len(all_categories):
-                    row.append(types.InlineKeyboardButton(all_categories[i+1]['name'], callback_data=f"category_{all_categories[i+1]['id']}"))
-                markup.add(*row)
-            bot.send_message(chat_id, "Каталог", reply_markup=markup)
+            if not categories.all():
+                bot.send_message(chat_id, "Категории пока не добавлены")
+            else:
+                bot.send_message(chat_id, "Каталог", reply_markup=build_categories_markup())
         
         elif call.data.startswith("buy_stars_"):
             item_id = int(call.data.split("_")[2])
@@ -163,15 +204,10 @@ def callback_handler(call):
         
         elif call.data == "back_to_catalog":
             bot.delete_message(chat_id, message_id)
-            markup = types.InlineKeyboardMarkup()
-            all_categories = categories.all()
-            for i in range(0, len(all_categories), 2):
-                row = []
-                row.append(types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"category_{all_categories[i]['id']}"))
-                if i + 1 < len(all_categories):
-                    row.append(types.InlineKeyboardButton(all_categories[i+1]['name'], callback_data=f"category_{all_categories[i+1]['id']}"))
-                markup.add(*row)
-            bot.send_message(chat_id, "Каталог", reply_markup=markup)
+            if not categories.all():
+                bot.send_message(chat_id, "Категории пока не добавлены")
+            else:
+                bot.send_message(chat_id, "Каталог", reply_markup=build_categories_markup())
         
         elif call.data.startswith("buy_"):
             item_id = int(call.data.split("_")[1])
@@ -187,7 +223,10 @@ def callback_handler(call):
             item = products.get(Query().id == item_id)
             user = users.get(Query().user_id == user_id)
             if item and user:
-                if user['balance'] >= item['price']:
+                already_purchased = purchases.contains((Query().user_id == user_id) & (Query().item_id == item_id))
+                if already_purchased:
+                    bot.edit_message_text("ℹ️ Этот товар уже был куплен ранее. Используйте раздел 'Мои покупки'.", chat_id, message_id)
+                elif user['balance'] >= item['price']:
                     bot.delete_message(chat_id, message_id)
                     users.update({'balance': user['balance'] - item['price'], 'purchases': user['purchases'] + 1, 'total_spent': user['total_spent'] + item['price']}, Query().user_id == user_id)
                     purchases.insert({'user_id': user_id, 'item_id': item_id, 'price': item['price'], 'currency': '$', 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
@@ -204,15 +243,19 @@ def callback_handler(call):
         
         elif call.data.startswith("check_"):
             invoice_id = call.data.split("_")[1]
-            status = check_payment(invoice_id)
-            if status:
-                amount = float(status['amount'])
-                user = users.get(Query().user_id == user_id)
-                users.update({'balance': user['balance'] + amount, 'total_deposited': user['total_deposited'] + amount}, Query().user_id == user_id)
-                stats.insert({'type': 'payment', 'amount': amount, 'timestamp': datetime.now().strftime('%Y-%m-%d')})
-                bot.edit_message_text("✅ Оплата успешно завершена!", chat_id, message_id)
+            if invoices.contains(Query().invoice_id == str(invoice_id)):
+                bot.answer_callback_query(call.id, "Этот платеж уже был зачислен")
             else:
-                bot.answer_callback_query(call.id, "Платеж еще не завершен")
+                status = check_payment(invoice_id)
+                if status:
+                    amount = float(status['amount'])
+                    user = users.get(Query().user_id == user_id)
+                    users.update({'balance': user['balance'] + amount, 'total_deposited': user['total_deposited'] + amount}, Query().user_id == user_id)
+                    invoices.insert({'invoice_id': str(invoice_id), 'user_id': user_id, 'amount': amount, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                    stats.insert({'type': 'payment', 'amount': amount, 'timestamp': datetime.now().strftime('%Y-%m-%d')})
+                    bot.edit_message_text("✅ Оплата успешно завершена!", chat_id, message_id)
+                else:
+                    bot.answer_callback_query(call.id, "Платеж еще не завершен")
         
         elif call.data == "admin_stats":
             stats_text = get_stats()
@@ -223,13 +266,16 @@ def callback_handler(call):
         elif call.data == "admin_add":
             markup = types.InlineKeyboardMarkup()
             all_categories = categories.all()
-            for i in range(0, len(all_categories), 2):
-                row = []
-                row.append(types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"admin_select_category_{all_categories[i]['id']}"))
-                if i + 1 < len(all_categories):
-                    row.append(types.InlineKeyboardButton(all_categories[i+1]['name'], callback_data=f"admin_select_category_{all_categories[i+1]['id']}"))
-                markup.add(*row)
-            bot.send_message(chat_id, "Выберите раздел для создания товара", reply_markup=markup)
+            if not all_categories:
+                bot.send_message(chat_id, "Сначала создайте хотя бы один раздел")
+            else:
+                for i in range(0, len(all_categories), 2):
+                    row = []
+                    row.append(types.InlineKeyboardButton(all_categories[i]['name'], callback_data=f"admin_select_category_{all_categories[i]['id']}"))
+                    if i + 1 < len(all_categories):
+                        row.append(types.InlineKeyboardButton(all_categories[i+1]['name'], callback_data=f"admin_select_category_{all_categories[i+1]['id']}"))
+                    markup.add(*row)
+                bot.send_message(chat_id, "Выберите раздел для создания товара", reply_markup=markup)
         
         elif call.data == "admin_create_category":
             bot.delete_message(chat_id, message_id)
@@ -305,7 +351,12 @@ def process_successful_payment(message):
             user_id = int(payload[2])
             item = products.get(Query().id == item_id)
             if item:
-                users.update({'purchases': users.get(Query().user_id == user_id)['purchases'] + 1}, Query().user_id == user_id)
+                already_purchased = purchases.contains((Query().user_id == user_id) & (Query().item_id == item_id))
+                if already_purchased:
+                    bot.send_message(message.chat.id, "ℹ️ Товар уже был куплен ранее. Повторно не списываем.")
+                    return
+                user = users.get(Query().user_id == user_id)
+                users.update({'purchases': user['purchases'] + 1}, Query().user_id == user_id)
                 purchases.insert({'user_id': user_id, 'item_id': item_id, 'price': item['stars_price'], 'currency': 'Telegram Stars', 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
                 bot.send_message(message.chat.id, "⚡️")
                 if 'file_id' in item:
@@ -319,7 +370,7 @@ def create_category(message):
         bot.send_message(message.chat.id, "Название раздела не может быть пустым!")
         return
     name = message.text
-    category_id = len(categories) + 1
+    category_id = next_table_id(categories)
     categories.insert({'id': category_id, 'name': name})
     bot.send_message(message.chat.id, "Раздел создан")
 
@@ -353,7 +404,7 @@ def create_cryptobot_invoice(amount, user_id):
     headers = {'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json'}
     payload = {'amount': str(amount), 'asset': 'USDT', 'description': f'Пополнение баланса пользователя {user_id}'}
     try:
-        response = requests.post(f'{CRYPTOBOT_API_URL}createInvoice', headers=headers, json=payload)
+        response = requests.post(f'{CRYPTOBOT_API_URL}createInvoice', headers=headers, json=payload, timeout=10)
         response.raise_for_status()
         data = response.json()
         if 'ok' in data and data['ok'] and 'result' in data:
@@ -369,7 +420,7 @@ def create_cryptobot_invoice(amount, user_id):
 def check_payment(invoice_id):
     headers = {'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN, 'Content-Type': 'application/json'}
     try:
-        response = requests.get(f'{CRYPTOBOT_API_URL}getInvoices?invoice_ids={invoice_id}', headers=headers)
+        response = requests.get(f'{CRYPTOBOT_API_URL}getInvoices?invoice_ids={invoice_id}', headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data['ok'] and 'result' in data and data['result']['items']:
@@ -435,7 +486,7 @@ def add_product_file(message, name, desc, price, stars_price, category_id):
         file_msg = bot.send_document(DB_CHANNEL_ID, message.document.file_id)
         file_id = file_msg.document.file_id
         bot.delete_message(message.chat.id, message.message_id - 1)
-        product_id = len(products) + 1
+        product_id = next_table_id(products)
         products.insert({'id': product_id, 'name': name, 'description': desc, 'price': price, 'stars_price': stars_price, 'file_id': file_id, 'category_id': category_id})
         bot.send_message(message.chat.id, "Товар создан")
     else:
